@@ -1,0 +1,941 @@
+---
+title: "Meeting Specific Needs With a General Framework"
+subtitle: Reporting Table Generation With R and '<span style="font-family:Source Code Pro;">rtables</span>'
+author: 'Gabriel Becker <br/> ![](./Twitter_Social_Icon_Square_Color.png){width=22px height=22px} @groundwalkergmb ![](./GitHub-Mark-32px.png){width=22px height=22px} @gmbecker'
+header-includes: 
+output:
+  ioslides_presentation: 
+    css: style.css
+    widescreen: true
+    keep_md: true
+    incremental: true
+    includes:
+      after_body: tehax.html
+  md_document: default
+---
+
+# Introduction
+
+## Me
+
+- Primary developer of `rtables >= 0.2.0`
+- Statistical Computing Consultant
+- PhD in Statistical Computing 
+- Frequent collaborator with R core team
+  - several new features incorporated into R
+
+
+## R Tables For Regulatory Submission (RTRS) Working Group
+
+<div style="font-size:22px">
+- RConsortium Formal Working Group
+- Members represent
+  - Multiple Pharma Companies
+  - Multiple table package authors
+  - US FDA
+  - RStudio
+- Ongoing work to assess full feature-space Pharma Tables
+- Collectively Authoring "State of the Field" style lit. review
+</div>
+
+## RTRS-WG Call For Difficult Tables
+
+<center> 
+<img src="./call_for_tables.png" width="65%"/>
+</center>
+
+<br />
+File issues at:<br/>
+https://github.com/RConsortium/rtrs-wg/issues
+
+
+# `rtables`
+
+## `rtables` - What 
+
+R package: 
+
+- Purpose built to create reporting tables
+- General across table types
+- Modern expressive API
+
+## `rtables` - Why
+
+Cornerstone piece of larger work to enable clinical trial work in R
+
+- Tables aren't enough by themselves, but
+- Can't file without tables
+
+
+## `rtables` - Impact at Roche
+
+196 Internal Production Table Variant Templates Across 24 Categories
+```{R setup, echo = FALSE, results="hide"}
+knitr::opts_chunk$set(comment = NA)
+
+library(rtables, quietly = TRUE)
+library(dplyr, quietly = TRUE)
+library(XML, quietly = TRUE)
+```
+
+```{r table, echo = FALSE, results="verbatim"}
+dir <- "~/gabe/checkedout/tlgc-docs/tlg_catalog/tables"
+fils <- list.files(dir, pattern = "\\.html$", recursive = TRUE, full.names= TRUE)
+fils <- fils[fils != normalizePath(file.path(dir, "index.html"))]
+
+onefun <- function(fil) {
+    doc <- htmlParse(fil)
+    toc <- xpathApply(doc, "//*[@id='TableOfContents']/ul/li/ul", readHTMLList)
+    if(length(toc) == 0) {
+        return(1)
+    }
+    sum(grepl("^[[:digit:]]", toc[[1]]))
+}
+
+counts <- sapply(fils, onefun)
+
+## mmrmt count happens to accidentally be right anyway even with the 1.1 1.2 etc issue.
+
+types <- gsub(".*/tables/([^/[:digit:]]*)[^/]*/index.html", "\\1", names(counts))
+
+collapse_types <- function(vec, newv, oldvs) {
+    vec[vec %in% oldvs] <- newv
+    vec
+}
+
+keep_types <- c("dmt", "aet", "lbt", "dsp", "cmt", "ttet", "egt")
+smdl_types <- c("coxt", "mmrmt", "aovt", "cmht", "lgrt")
+types <- collapse_types(types, "smodl", smdl_types)
+keep_types <- c(keep_types, "smodl")
+resp_types <- c("rspt", "dort")
+types <- collapse_types(types, "resp", resp_types)
+keep_types <- c(keep_types, "resp")
+
+types <- collapse_types(types, "other", setdiff(types, keep_types))
+
+
+lab_df <- tribble(~type, ~label,
+              "dmt", "Demographics and Baseline",
+              "aet", "Adverse Event",
+              "lbt", "Lab Test",
+              "smodl", "Statistical Model Summary",
+              "cmt", "Concomittant Medication",
+              "resp", "Response-Related",
+              "other", "Other",
+              "rmpt", "Risk Management Plan",
+              "ttet", "Time To Event",
+              "dsp", "Disposition",
+              "egt", "ECG Related")
+              
+count_df <- data.frame(type = types, counts = counts)
+
+fulldat <- merge(count_df, lab_df, by = "type", all.x = TRUE)
+
+fulldat$label <- factor(fulldat$label)
+
+basic_table() %>%  add_overall_col("Production Table Templates") %>%
+    summarize_row_groups("counts", cfun = function(df, labelstr) in_rows("Total" = rcell(sum(df$counts), "xx"))) %>% 
+    analyze("label", afun = function(df) in_rows(.list = tapply(df$count, df$label, sum,
+                                                simplify = FALSE))) %>%
+    build_table(fulldat)
+```
+
+## `rtables` Usage In Practice
+
+
+- In use in multiple active Roche trials
+  - Will be used in any filings from these trials
+- (Planned) All new Roche studies starting in 2023
+- Powers exploratory work across many programs
+  - Including those not currently using it for regulator tables
+
+
+## Availability
+
+`rtables` is
+
+- Open Source with Permissive License
+- Available on CRAN
+- Developed in Public
+  - https://github.com/Roche/rtables
+- Funded and Copyright F. Hoffmann-La Roche AG
+
+
+# `rtables` introduction
+
+
+
+## `rtables` Is General But Informed By Pharma's Needs
+
+<div style="font-size:22px">
+- Complex Table Structures
+  - Row & Column Space
+- Row-group Summaries
+- "Top-left" Annotations
+- Titles and Footers
+- Referential Footnotes
+- Pagination
+- Alternate Patient Counts
+</div>
+
+
+## Consider an AE Table
+
+```{r echo = FALSE, size="tiny"}
+
+set.seed(1)
+
+lookup <- tribble(
+  ~AEDECOD,                          ~AEBODSYS,                                         ~AETOXGR,
+  'HEADACHE',                        "NERVOUS SYSTEM DISORDERS",                        "2",
+#  'BACK PAIN',                       "MUSCULOSKELETAL AND CONNECTIVE TISSUE DISORDERS", "2",
+##  'GINGIVAL BLEEDING',               "GASTROINTESTINAL DISORDERS",                      "1",
+   'HYPOTENSION',                     "VASCULAR DISORDERS",                              "1",
+  ## 'FAECES SOFT',                     "GASTROINTESTINAL DISORDERS",                      "2",
+  ## 'ABDOMINAL DISCOMFORT',            "GASTROINTESTINAL DISORDERS",                      "1",
+  ## 'DIARRHEA',                        "GASTROINTESTINAL DISORDERS",                      "1",
+  ## 'ABDOMINAL FULLNESS DUE TO GAS',   "GASTROINTESTINAL DISORDERS",                      "1",
+  ## 'NAUSEA (INTERMITTENT)',           "GASTROINTESTINAL DISORDERS",                      "2",
+#  'WEAKNESS',                        "MUSCULOSKELETAL AND CONNECTIVE TISSUE DISORDERS", "3",
+  'ORTHOSTATIC HYPOTENSION',         "VASCULAR DISORDERS",                              "2"
+)
+
+normalize <- function(x) x/sum(x)
+weightsA <- normalize(c(0.1, dlnorm(seq(0, 5, length.out = 25), meanlog = 3)))
+weightsB <- normalize(c(0.2, dlnorm(seq(0, 5, length.out = 25))))
+
+N_pop <- 300
+ADSL2 <- data.frame(
+  USUBJID = seq(1, N_pop, by = 1),
+  ARM = sample(c('ARM A', 'ARM B'), N_pop, TRUE),
+  SEX = sample(c('F', 'M'), N_pop, TRUE),
+  AGE = 20 + rbinom(N_pop, size=40, prob=0.7),
+  BMRKR = sample(c("High", "Low"), N_pop, TRUE)
+)
+                                      
+l.adae <- mapply(ADSL2$USUBJID, ADSL2$ARM, ADSL2$SEX, ADSL2$AGE, FUN = function(id, arm, sex, age) {
+  n_ae <- sample(0:25, 1, prob = if (arm == "ARM A") weightsA else weightsB)
+  i <- sample(1:nrow(lookup), size = n_ae, replace = TRUE, prob = c(6, 3, 3))
+  lookup[i, ] %>% 
+    mutate(
+      AESEQ = seq_len(n()),
+      USUBJID = id, ARM = arm, SEX = sex, AGE = age
+    )
+}, SIMPLIFY = FALSE)
+
+ADAE2 <- do.call(rbind, l.adae)
+ADAE2 <- ADAE2 %>% 
+  mutate(
+    ARM = factor(ARM, levels = c("ARM A", "ARM B")),
+    AEDECOD = as.factor(AEDECOD),
+    AEBODSYS = as.factor(AEBODSYS), 
+    AETOXGR = factor(AETOXGR, levels = as.character(1:3))
+  ) %>% 
+  select(USUBJID, ARM, AGE, SEX, AESEQ, AEDECOD, AEBODSYS, AETOXGR)
+
+ADAE2 <- merge(ADAE2, ADSL2[,c("USUBJID", "BMRKR")], by = "USUBJID", all.x = TRUE, all.y = FALSE)
+
+s_events_patients <- function(df, labelstr, .N_col) {
+    x <- df$USUBJID
+  in_rows(
+    "pat_count" = 
+      rcell(length(unique(x)) * c(1, 1/.N_col), format = "xx (xx.x%)"),
+    
+    "ev_count" = rcell(length(x), format = "xx"),
+    " " = rcell("", format = "xx"),
+    .labels = c("Patients with >0 events",
+                "Total events",
+                "")
+  )
+}
+
+table_count_once_per_id <- function(df, termvar = "AEDECOD", idvar = "USUBJID") {
+
+  x <- df[[termvar]]
+  id <- df[[idvar]]
+ 
+  counts <- table(x[!duplicated(id)])
+  
+  in_rows(
+    .list = as.vector(counts),
+    .labels = names(counts)
+  )
+}
+
+ids_per_grade <- function(df,
+                                          labelstr = "",
+                                          gradevar = "AETOXGR",
+                                          idvar = "USUBJID",
+                                          grade_levels = 1:2) {
+  
+  id <- df[[idvar]]
+  grade <- df[[gradevar]]
+  
+  if (!is.null(grade_levels)) {
+    stopifnot(all(grade %in% grade_levels))
+    grade <- factor(grade, levels = grade_levels)
+  }
+  
+    id_sel <- !duplicated(id)
+    tbl_dat <- as.list(table(grade[id_sel]))
+  
+  in_rows(
+      "--Any Grade--" = sum(id_sel),
+      .list =  c(tbl_dat, blank = rcell("")),
+      .labels = c("--Any Grade--", names(tbl_dat), ""),
+      .indent_mods = rep(-1, times = length(tbl_dat) + 2),
+      .formats = rep("xx", times = length(tbl_dat) + 2)
+     )
+}
+
+ex_adsl2 <- subset(ex_adsl, ARMCD %in% c("ARM A", "ARM B"))
+ex_adsl2$ARMCD <- factor(ex_adsl2$ARMCD, levels = c("ARM A", "ARM B"))
+
+combo_df <- data.frame(valname = "ALL", label = "All Patients", levelcombo = I(list(c("High", "Low"))),
+                       exargs = I(list(list())), stringsAsFactors = FALSE)
+
+wwind_prov_stamp <- function() {
+    paste0("file: /path/to/WILLOWWIND/aet05.R *** data snapshot: ", Sys.Date(), " *** user: gb123")
+}
+
+
+tbl <- basic_table(title="Adverse Events", subtitles = "By Arm, Biomarker Load and Grade") %>% 
+    split_cols_by("ARM",
+                  split_fun = add_overall_level("All Patients", first = FALSE)) %>%
+    split_cols_by("BMRKR") %>%
+    add_colcounts() %>%
+    summarize_row_groups("USUBJID", cfun = s_events_patients) %>%
+    analyze("AETOXGR", 
+            afun = ids_per_grade, show_labels = "hidden") %>%
+    split_rows_by("AEBODSYS", child_labels = "visible", indent_mod = -1,
+                  split_fun = trim_levels_in_group("AEDECOD")) %>%
+    summarize_row_groups(cfun = ids_per_grade) %>%
+    split_rows_by("AEDECOD")  %>%
+    analyze("AETOXGR", 
+            afun = ids_per_grade) %>%
+    build_table(ADAE2, alt_counts_df = ADSL2)
+tbl
+```
+
+## Starting Simple
+<div style="float: left; width: 55%;">
+```{r tab1, results = "hide"}
+l <-basic_table() %>%
+    analyze("USUBJID", afun = s_events_patients) 
+build_table(l, ADAE2, alt_counts_df = ADSL2)
+```
+</div>
+<div style="float: right; width: 45%;">
+```{r tab1out, ref.label="tab1", echo = FALSE}
+
+```
+</div>
+
+
+
+
+## Splitting By Arm
+<div style="float: left; width: 55%;">
+```{r tab2, results = "hide"}
+l <-basic_table() %>%
+### <b>
+    split_cols_by("ARM") %>%
+### </b>
+    analyze("USUBJID", afun = s_events_patients) 
+build_table(l, ADAE2, alt_counts_df = ADSL2)
+```
+</div>
+<div style="float: right; width: 45%;">
+```{r tab2out, ref.label="tab2", echo = FALSE}
+
+```
+</div>
+
+
+
+## Counting By Grade
+<div style="float: left; width: 55%;">
+```{r tab3, results = "hide"}
+l <-basic_table() %>%
+    split_cols_by("ARM") %>%
+### <b>
+    summarize_row_groups("USUBJID",
+            cfun = s_events_patients) %>%
+    analyze("AETOXGR",
+            afun = ids_per_grade,
+            show_labels = "hidden")
+### </b>
+build_table(l, ADAE2, alt_counts_df = ADSL2)
+```
+</div>
+<div style="float: right; width: 45%;">
+```{r tab3out, ref.label="tab3", echo = FALSE}
+
+```
+</div>
+
+## Splitting By System Organ Class
+
+<div style="float: left; width: 55%;">
+```{r tab4, results = "hide"}
+l <-basic_table() %>%
+    split_cols_by("ARM") %>%
+    summarize_row_groups("USUBJID",
+            cfun = s_events_patients) %>%
+    ### <b>
+    split_rows_by("AEBODSYS",
+                  child_labels = "visible",
+                  indent_mod = -1,
+                  split_fun = trim_levels_in_group("AEDECOD")) %>%
+### </b>
+    analyze("AETOXGR",
+            afun = ids_per_grade,
+            show_labels = "hidden")
+build_table(l, ADAE2, alt_counts_df = ADSL2)
+```
+</div>
+<div style="float: right; width: 45%;">
+```{r tab4out, ref.label="tab4", echo = FALSE}
+
+```
+</div>
+
+
+## Splitting By Preffered Term Within SOC
+
+<div style="float: left; width: 55%;">
+```{r tab5, results = "hide"}
+l <-basic_table() %>%
+    split_cols_by("ARM") %>%
+    summarize_row_groups("USUBJID",
+            cfun = s_events_patients) %>% 
+    split_rows_by("AEBODSYS",
+                  child_labels = "visible",
+                  indent_mod = -1,
+                  split_fun = trim_levels_in_group("AEDECOD")) %>%
+    ### <b>
+    split_rows_by("AEDECOD") %>%
+### </b>
+    analyze("AETOXGR",
+            afun = ids_per_grade,
+            show_labels = "hidden")
+build_table(l, ADAE2, alt_counts_df = ADSL2)
+```
+</div>
+<div style="float: right; width: 45%;">
+```{r tab5out, ref.label="tab5", echo = FALSE}
+
+```
+</div>
+
+
+## Summarizing SOC
+
+<div style="float: left; width: 55%;">
+```{r tab6, results = "hide"}
+l <-basic_table() %>%
+    split_cols_by("ARM") %>%
+    summarize_row_groups("USUBJID",
+            cfun = s_events_patients) %>% 
+    split_rows_by("AEBODSYS",
+                  child_labels = "visible",
+                  indent_mod = -1,
+                  split_fun = trim_levels_in_group("AEDECOD")) %>%
+    ### <b>
+    summarize_row_groups("AETOXGR",
+                         cfun = ids_per_grade) %>%
+### </b>
+    split_rows_by("AEDECOD") %>%
+    analyze("AETOXGR",
+            afun = ids_per_grade,
+            show_labels = "hidden")
+build_table(l, ADAE2, alt_counts_df = ADSL2)
+```
+</div>
+<div style="float: right; width: 45%;">
+```{r tab6out, ref.label="tab6", echo = FALSE}
+
+```
+</div>
+
+## Adding an All Patients Column
+
+
+<div style="float: left; width: 55%;">
+```{r tab7, results = "hide"}
+l <-basic_table() %>%
+    split_cols_by("ARM",
+### <b>
+                  split_fun = add_overall_level("All Patients",
+                                                first = FALSE)) %>%
+### </b>
+    summarize_row_groups("USUBJID",
+                         cfun = s_events_patients) %>%
+    split_rows_by("AEBODSYS",
+                  child_labels = "visible",
+                  indent_mod = -1,
+                  split_fun = trim_levels_in_group("AEDECOD")) %>%
+    summarize_row_groups("AETOXGR",
+                         cfun = ids_per_grade) %>%
+    split_rows_by("AEDECOD") %>%
+    analyze("AETOXGR",
+            afun = ids_per_grade,
+            show_labels = "hidden")
+build_table(l, ADAE2, alt_counts_df = ADSL2)
+```
+</div>
+<div style="float: right; width: 45%;">
+```{r tab7out, ref.label="tab7", echo = FALSE}
+
+```
+</div>
+
+
+## Title/Footer Annotations
+
+<div style="float: left; width: 55%;">
+```{r tab8, results = "hide"}
+## <b>
+l <-basic_table(title = "WILLOWWIND - Adverse Events By Grade",
+                prov_footer = wwind_prov_stamp()) %>%
+    ## </b>
+    split_cols_by("ARM",
+                  split_fun = add_overall_level("All Patients",
+                                                first = FALSE)) %>%
+    summarize_row_groups("USUBJID",
+            cfun = s_events_patients) %>%
+    split_rows_by("AEBODSYS",
+                  child_labels = "visible",
+                  indent_mod = -1,
+                  split_fun = trim_levels_in_group("AEDECOD")) %>%
+    summarize_row_groups("AETOXGR",
+                         cfun = ids_per_grade) %>%
+    split_rows_by("AEDECOD") %>%
+    analyze("AETOXGR",
+            afun = ids_per_grade,
+            show_labels = "hidden")
+build_table(l, ADAE2, alt_counts_df = ADSL2)
+```
+</div>
+<div style="float: right; width: 45%;">
+```{r tab8out, ref.label="tab8", echo = FALSE}
+
+```
+</div>
+
+
+## Referential Footnotes
+
+<div style="float: left; width: 55%;">
+```{r tab9, results = "hide"}
+l <-basic_table(title = "WILLOWWIND - Adverse Events By Grade",
+                prov_footer = wwind_prov_stamp()) %>% 
+    split_cols_by("ARM",
+                  split_fun = add_overall_level("All Patients",
+                                                first = FALSE)) %>%
+    summarize_row_groups("USUBJID",
+            cfun = s_events_patients) %>%
+    split_rows_by("AEBODSYS",
+                  child_labels = "visible",
+                  indent_mod = -1,
+                  split_fun = trim_levels_in_group("AEDECOD")) %>%
+    summarize_row_groups("AETOXGR",
+                         cfun = ids_per_grade) %>%
+    split_rows_by("AEDECOD") %>%
+    analyze("AETOXGR",
+            afun = ids_per_grade,
+            show_labels = "hidden")
+tbl_narrow <- build_table(l, ADAE2, alt_counts_df = ADSL2)
+## <b>
+fnotes_at_path(tbl_narrow,
+               c("AEBODSYS", "NERVOUS SYSTEM DISORDERS",
+                 "AEDECOD", "HEADACHE")) <- "Non-migraine"
+## </b>
+tbl_narrow
+                 
+```
+</div>
+<div style="float: right; width: 45%;">
+```{r tab9out, ref.label="tab9", echo = FALSE}
+
+```
+</div>
+
+
+## The Culmination
+
+```{r tab10, results = "hide"}
+l <-basic_table(title = "WILLOWWIND - Adverse Events By Grade",
+                prov_footer = wwind_prov_stamp()) %>% 
+    split_cols_by("ARM",
+                  split_fun = add_overall_level("All Patients",
+                                                first = FALSE)) %>%
+    ## <b>
+    split_cols_by("BMRKR") %>%
+    ## </b>
+    summarize_row_groups("USUBJID",
+            cfun = s_events_patients) %>% 
+    split_rows_by("AEBODSYS",
+                  split_fun = trim_levels_in_group("AEDECOD"),
+                  child_labels = "visible",
+                  indent_mod = -1) %>%
+    summarize_row_groups("AETOXGR",
+                         cfun = ids_per_grade) %>%
+    split_rows_by("AEDECOD") %>%
+    analyze("AETOXGR",
+            afun = ids_per_grade,
+            show_labels = "hidden")
+tbl <- build_table(l, ADAE2, alt_counts_df = ADSL2)
+fnotes_at_path(tbl,
+               c("AEBODSYS", "NERVOUS SYSTEM DISORDERS",
+                 "AEDECOD", "HEADACHE")) <- "Non-migraine"
+tbl
+                 
+```
+
+## The Table
+
+```{r tab10out, ref.label="tab10", echo = FALSE}
+
+```
+
+## Table Layout Code Is Naturally Parameterized
+
+<div class="sm_code_margins highlight-code">
+<div style="float: left; width: 48%;">
+Table Structure
+```{r tab11, eval=FALSE, results = "hide"}
+l <-basic_table(title = "WILLOWWIND - Adverse Events By Grade",
+                prov_footer = wwind_prov_stamp()) %>% 
+    ## <b>
+    split_cols_by("ARM",
+    ##</b>
+                  split_fun = add_overall_level("All Patients",
+                                                first = FALSE)
+                  ) %>%
+    ## <b>
+    split_cols_by("BMRKR") %>%
+    summarize_row_groups("USUBJID",
+## </b>
+            cfun = s_events_patients) %>%
+## <b>
+    split_rows_by("AEBODSYS",
+## </b>
+                  split_fun = trim_levels_in_group("AEDECOD"),
+                  child_labels = "visible",
+                  indent_mod = -1) %>%
+## <b>
+    summarize_row_groups("AETOXGR",
+## </b>
+                         cfun = ids_per_grade) %>%
+## <b>
+    split_rows_by("AEDECOD") %>%
+    analyze("AETOXGR",
+## </b>
+            afun = ids_per_grade,
+            show_labels = "hidden")
+tbl <- build_table(l, ADAE2, alt_counts_df = ADSL2)              
+```
+</div>
+<div style="float: right; width: 48%;">
+Business Logic
+```{r tab12inp, eval = FALSE}
+l <-basic_table(title = "WILLOWWIND - Adverse Events By Grade",
+                prov_footer = wwind_prov_stamp()) %>% 
+    split_cols_by("ARM",
+                  ## <b>
+                  split_fun = add_overall_level("All Patients",
+                                                ##</b>
+                                                first = FALSE)
+                  ) %>%
+    split_cols_by("BMRKR") %>%
+    summarize_row_groups("USUBJID",
+ ## <b>
+            cfun = s_events_patients) %>%
+ ## </b>
+    split_rows_by("AEBODSYS",
+                  ## <b>
+                  split_fun = trim_levels_in_group("AEDECOD"),
+                  ## </b>
+                  child_labels = "visible",
+                  indent_mod = -1) %>%
+    summarize_row_groups("AETOXGR",
+## <b>
+                         cfun = ids_per_grade) %>%
+## </b>
+    split_rows_by("AEDECOD") %>%
+    analyze("AETOXGR",
+## <b>
+            afun = ids_per_grade,
+## </b>
+            show_labels = "hidden")
+tbl <- build_table(l, ADAE2, alt_counts_df = ADSL2)
+```
+
+</div>
+</div>
+
+## Multi-target Tables
+
+```{r set_format_at_path, echo = FALSE}
+
+
+set_format_at_path <- function(obj, rpath = NULL, cpath = NULL, format) {
+    smallone <- tt_at_path(obj, rpath)
+    if(NROW(smallone) == 1) {
+        rcs <- row_cells(smallone)
+        ind <- rtables:::.path_to_pos(cpath, obj, cols = TRUE)
+        for(i in ind)
+            obj_format(rcs[[i]]) <- format
+        smallone <- rtables:::`row_cells<-`(smallone, rcs)
+    } else if (is.null(cpath)) {
+        if(recursive)
+            smallone <- rtables:::set_format_recursive(smallone, format, override = TRUE)
+        else
+            obj_format(smallone) <- format
+    } else {
+        stop("cpath must be NULL when rpath selects more than one row")
+    }
+    tt_at_path(obj, rpath) <- smallone
+    obj
+
+}
+
+```
+
+<div style="float: left; width: 48%;">
+```{r multitarg1}
+l <-basic_table() %>%
+    split_cols_by("ARM") %>%
+    summarize_row_groups("USUBJID",
+            cfun = s_events_patients) %>%
+    analyze("AETOXGR",
+            afun = ids_per_grade,
+            show_labels = "hidden")
+tbl <- build_table(l, ADAE2, alt_counts_df = ADSL2)
+tbl
+```
+</div>
+<div style="float: right; width: 48%;">
+```{r multitarg2}
+## for now helper I wrote, coming to rtables API soon
+set_format_at_path(tbl, c("root",
+                           "@content", "pat_count"),
+                   format = "xx (xx.xx%)")
+```
+
+
+```{r multitarg3}
+set_format_at_path(tbl, c("root",
+                           "@content", "pat_count"),
+                   format = "xx (xx.%)")
+```
+ </div>
+
+
+## Pagination
+<div style="float: left; width: 48%;">
+```{r pag1}
+pagtbl <- paginate_table(tbl_narrow, lpp = 35)
+pagtbl[[1]]
+```
+</div>
+<div style="float: right; width: 48%;">
+```{r pag2}
+pagtbl[[2]]
+```
+</div>
+
+
+## Page-by Splitting
+<div style="float: left; width: 55%;">
+```{r pageby1}
+l <-basic_table(title = "WILLOWWIND - Adverse Events By Grade",
+                prov_footer = wwind_prov_stamp()) %>% 
+    split_cols_by("ARM",
+                  split_fun = add_overall_level("All Patients",
+                                                first = FALSE)) %>%
+    ## <b>
+    split_rows_by("BMRKR", page_by=TRUE) %>%
+    ## </b>
+    split_rows_by("AEBODSYS",
+                  split_fun = trim_levels_in_group("AEDECOD"),
+                  child_labels = "visible",
+                  indent_mod = -1) %>%
+    analyze("AETOXGR",
+            afun = ids_per_grade,
+            show_labels = "hidden")
+tbl <- build_table(l, ADAE2, alt_counts_df = ADSL2)
+ptbl <- paginate_table(tbl, lpp = 35)
+ptbl[[1]]
+```
+
+</div>
+<div style="float: right; width: 40%;">
+```{r pageby2}
+ptbl[[2]]
+```
+</div>
+
+# Abstraction and Types of Effort
+
+##
+
+<center> 
+<img src="./rising_tide.jpg" width="65%"/>
+</center>
+
+##
+
+<center> 
+<img src="./rising_tide.jpg" width="65%"/>
+
+Not always, but it ***can***
+</center>
+
+
+
+
+## Types of Effort In Creating Tables
+
+- Front Line Work - SPAs
+- SPA-Enabling Develoment (SMEs)
+- Core/general Tooling Development
+
+
+## SPAs
+
+- Responsible for ultimate creation of tables
+- Use templates and other tools provided to them
+- Creation of Ad-hoc Tables
+- "Last-Mile Delivery"
+
+## SMEs - SPA Enabling Tool Developers
+
+- Develop table templates/functions
+- Business and Statistical Logic
+  - for standard tables
+ 
+## Core Table Framework
+
+- Provide building blocks and tools that SMEs use
+- Not targeted specifically at any particular table endpoint
+
+
+## Largely Unsupported SPAs
+<center> 
+<img src="./tables_effort_artisanal.drawio.svg" width="65%"/>
+</center>
+
+## Robust Spa-Enabling Dev Efforts
+
+<center> 
+<img src="./tables_effort_middleground.drawio.svg" width="65%"/>
+</center>
+
+## Basic Research/Innovation Supporting SMEs
+<center> 
+<img src="./tables_effort_framework.drawio.svg" width="65%"/>
+</center>
+
+# Beware
+
+##
+<center> 
+<img src="./something_adhoc.png" width="65%"/>
+</center>
+
+
+## Largely Unsupported SPAs
+<center> 
+<img src="./tables_effort_artisanal_adhoc.drawio.svg" width="85%"/>
+</center>
+
+## Robust Spa-Enabling Dev Efforts
+
+<center> 
+<img src="./tables_effort_middleground_adhoc.drawio.svg" width="85%"/>
+</center>
+
+## Basic Research/Innovation Supporting SMEs
+<center> 
+<img src="./tables_effort_framework_adhoc.drawio.svg" width="85%"/>
+</center>
+
+# Research, Innovation, and Stakeholder Needs
+
+## The Apocryphal Henry Ford
+
+
+<center> 
+<img src="./faster_horses.jpeg" width="85%"/>
+</center>
+
+## `rtables` Is Not Faster Horses
+
+- New (to R) way to make tables
+- Result of novel statistical computing research
+
+## Three Pillars of How We Got Here
+
+<center> 
+<img src="./3pillars_cropped.png" width="65%"/>
+</center>
+
+
+
+## Management Support
+
+<div style="font-size:22px">
+Upper Management
+
+- Support POs and Tech Leads
+  - Trust them to identify and pursue innovation
+
+NEST Leadership 
+
+- Then Adrian Waddell (TL) and Tad Lewandowski (PO)
+  - Saw importance of tables as both need and opportunity
+  - Devoted NEST efforts to innovate in table space
+  - Narrow, applied research program 
+	- ***within larger NEST product***
+- Now continued by Pawel Rucki (TL) and Jaime Pires (PO)
+</div>
+
+
+## Stakeholders - SME Team
+
+- Responsible for table template creation
+  - Formal goal of 200 tables during 2020
+- Communicated *what* they needed, **flexible on the how**
+- Willing to invest in learning new way of making tables
+  - resulting in **invaluable** feedback on API, capabilities, etc
+
+## Research - `rtables` Team
+
+- Not responsible for delivery of any given table
+  - frees us to think about tables as a whole
+- Asked SMEs **what they need to be able to do**
+  - not how it should let them do it
+- Direct frequent collaboration with SME team
+  - tight feedback loop
+  - what works, what doesn't, what's still missing
+
+
+## Knock Down Any of the Pillars
+
+`rtables` doesn't end up where it is now.
+
+# Next Steps
+
+## Whats Next For `rtables`
+
+- Collaboration with RStudio on tgen
+  - Multi output-format table renderer
+	- rtf, HTML, etc
+  - Visual formatting of tables
+	- color, bolding, etc
+- New features of `rtables`
+  - QC-targeting table comparison functionality
+
+
